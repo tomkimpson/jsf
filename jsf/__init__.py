@@ -1,9 +1,10 @@
 import random
 import math
 from typing import Any, Callable, Dict, List, NewType, Tuple, Union
-from jsf.types import Time, SystemState, CompartmentValue, Trajectory
+from jsf.types import Time, SystemState, CompartmentValue, Trajectory, TrajectoryWithThresholds
 from jsf import exact
 from jsf import sbml
+from jsf.dynamic_scaling import adjust_threshold
 
 
 def read_sbml(sbml_xml: str):
@@ -22,7 +23,7 @@ def read_sbml(sbml_xml: str):
     return sbml.read_sbml(sbml_xml)
 
 
-def jsf(x0: SystemState, rates, stoich, t_max, **kwargs) -> Trajectory:
+def jsf(x0: SystemState, rates, stoich, t_max, **kwargs) -> Union[Trajectory, TrajectoryWithThresholds]:
     """Generates a sample from the JSF process.
 
     Args:
@@ -35,7 +36,9 @@ def jsf(x0: SystemState, rates, stoich, t_max, **kwargs) -> Trajectory:
         **kwargs: A dictionary containing the simulation options.
 
     Returns:
-        A list containing the time series of the state of the system.
+        A Trajectory containing (compartment_histories, time_points) or
+        TrajectoryWithThresholds containing (compartment_histories, time_points, threshold_history)
+        if EnableDynamicThreshold=True is set in the config.
 
     Raises:
         RuntimeError: If the requested method is not implemented.
@@ -68,10 +71,15 @@ def JumpSwitchFlowSimulator(
             system.
         t_max: The final time of the simulation.
         options: A dictionary containing the simulation options.
+                 If 'seed' is provided, sets the random seed for reproducibility.
 
     Returns:
         A list containing the time series of the state of the system.
     """
+    # Set random seed if provided for reproducible results
+    if "seed" in options:
+        random.seed(options["seed"])
+    
     # NOTE In the nu-matrix each row is a reaction and each column
     # describes the number items of that species used in the reaction.
     # There is one rate for each reaction and since there is a column
@@ -127,6 +135,11 @@ def JumpSwitchFlowSimulator(
     # initialise solution arrays
     X = [[x0[i]] for i in range(nCompartments)]
     TauArr = [Time(0.0)]
+    
+    # Track threshold history if dynamic thresholds are enabled
+    track_thresholds = options.get("EnableDynamicThreshold", False)
+    ThresholdArr = [SwitchingThreshold[:]] if track_thresholds else []
+    
     iters = 0
 
     # Track Absolute time
@@ -150,6 +163,9 @@ def JumpSwitchFlowSimulator(
         Dtau = dt
         Xprev = SystemState([x[iters] for x in X])
         Props = rates(Xprev, ContT)
+
+        # Update dynamic threshold (backward compatible)
+        SwitchingThreshold = adjust_threshold(Xprev, nu, Props, ContT, SwitchingThreshold, options)
 
         # Perform the Forward Euler Step
         dXdt = ComputedXdt(Props, nu, frozenReaction, nCompartments)
@@ -224,6 +240,10 @@ def JumpSwitchFlowSimulator(
                         X[i].append(Xcurr[i])
 
                     TauArr.append(AbsT)
+                    
+                    # Track threshold at this time point if enabled (stochastic jump)
+                    if track_thresholds:
+                        ThresholdArr.append(SwitchingThreshold[:])
 
                     Dtau = Dtau - DtauMin
 
@@ -241,6 +261,13 @@ def JumpSwitchFlowSimulator(
         TauArr.append(ContT)
         for i in range(len(X)):
             X[i].append(CompartmentValue(X[i][iters - 1] + (0 if DoDisc[i] else (DtauContStep - TimePassed) * dXdt[i])))
+        
+        # Track threshold at this time point if enabled
+        if track_thresholds:
+            ThresholdArr.append(SwitchingThreshold[:])
+
+  
+
 
         if correctInteger == 1:
             pos = newlyDiscCompIndex
@@ -253,7 +280,11 @@ def JumpSwitchFlowSimulator(
                     randTimes[jj] = random.random()
             newlyDiscCompIndex = None
 
-    return Trajectory((X, TauArr))
+    # Return appropriate format based on whether thresholds were tracked
+    if track_thresholds:
+        return TrajectoryWithThresholds((X, TauArr, ThresholdArr))
+    else:
+        return Trajectory((X, TauArr))
 
 def ComputeFiringTimes(firedReactions,integralOfFiringTimes,randTimes,Props,dt,nRates,integralStep):
     tauArray = [0.0] * nRates
