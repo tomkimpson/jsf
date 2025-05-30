@@ -35,12 +35,16 @@ def JumpSwitchFlowExact(
         rates: Function that computes reaction rates.
         stoich: Stoichiometry matrix.
         t_max: Maximum time to simulate.
-        options: Simulation options.
+        options: Simulation options. If 'seed' is provided, sets the random seed for reproducibility.
 
     Returns:
         Trajectory of the simulation.
 
     """
+    # Set random seed if provided for reproducible results
+    if "seed" in options:
+        random.seed(options["seed"])
+        
     is_jumping = _is_jumping(x0, stoich, options)
     jump_clocks = [_new_jump_clock(is_j) for is_j in is_jumping]
     ext_state = ExtendedState(
